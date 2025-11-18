@@ -5,7 +5,6 @@ import re
 import tempfile
 import os
 
-# 页面配置
 st.set_page_config(page_title="PDF 排序工具", page_icon="📄", layout="wide")
 
 st.title("📄 PDF 排序工具（按 Excel 条码顺序）")
@@ -18,17 +17,20 @@ if 'download_file' not in st.session_state:
     st.session_state.download_file = None
 if 'failed_list' not in st.session_state:
     st.session_state.failed_list = []
-if 'total_barcodes' not in st.session_state:
-    st.session_state.total_barcodes = 0
-if 'warehouse_type' not in st.session_state:
-    st.session_state.warehouse_type = "FBA"
+if 'success_count' not in st.session_state:
+    st.session_state.success_count = 0
 
 # 重置函数
 def reset_processing():
     st.session_state.processed = False
     st.session_state.download_file = None
     st.session_state.failed_list = []
-    st.session_state.total_barcodes = 0
+    st.session_state.success_count = 0
+    # 清除上传的文件
+    if 'excel_uploader' in st.session_state:
+        st.session_state.excel_uploader = None
+    if 'pdf_uploader' in st.session_state:
+        st.session_state.pdf_uploader = None
 
 # 侧边栏选择目的仓类型
 with st.sidebar:
@@ -36,178 +38,154 @@ with st.sidebar:
     warehouse_type = st.selectbox(
         "选择目的仓类型",
         ["FBA", "AWD"],
-        help="FBA: 匹配FBA开头的20位字母数字条码 | AWD: 匹配18位数字条码"
+        help="FBA: 匹配FBA条码 | AWD: 匹配18位数字条码"
     )
-    st.session_state.warehouse_type = warehouse_type
     
-    if st.button("🔄 重置", use_container_width=True):
+    if st.button("🔄 重置所有", use_container_width=True):
         reset_processing()
         st.rerun()
 
 # 文件上传区域
-col1, col2 = st.columns(2)
-with col1:
-    uploaded_excel = st.file_uploader(
-        "上传 Excel 映射表（必须包含 label_bar_code 和 carton_code 列）", 
-        type=["xlsx"],
-        key="excel_uploader"
-    )
-with col2:
-    uploaded_pdf = st.file_uploader(
-        "上传原始 PDF 文件", 
-        type=["pdf"],
-        key="pdf_uploader"
-    )
+uploaded_excel = st.file_uploader(
+    "上传 Excel 映射表（必须包含 label_bar_code 和 carton_code 列）", 
+    type=["xlsx"],
+    key="excel_uploader"
+)
+uploaded_pdf = st.file_uploader(
+    "上传原始 PDF 文件", 
+    type=["pdf"],
+    key="pdf_uploader"
+)
 
-# 处理逻辑
 if uploaded_excel and uploaded_pdf and not st.session_state.processed:
     
-    if st.button("🚀 开始处理", type="primary", use_container_width=True):
-        with st.spinner("正在处理，请稍等…"):
-            try:
-                # 读取 Excel
-                df = pd.read_excel(uploaded_excel)
-                
-                # 检查必要的列是否存在
-                if 'label_bar_code' not in df.columns or 'carton_code' not in df.columns:
-                    st.error("❌ Excel文件中必须包含 'label_bar_code' 和 'carton_code' 列")
-                    st.stop()
-                
-                mapping = dict(zip(df['label_bar_code'].astype(str), df['carton_code']))
-                st.session_state.total_barcodes = len(mapping)
-                
-                # 临时保存 PDF 文件
-                tmp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
-                with open(tmp_pdf, "wb") as f:
-                    f.write(uploaded_pdf.read())
+    if st.button("🚀 开始处理", type="primary"):
+        st.info("正在处理，请稍等…")
 
-                reader = PdfReader(tmp_pdf)
+        try:
+            # 读取 Excel
+            df = pd.read_excel(uploaded_excel)
+            
+            # 检查必要的列是否存在
+            if 'label_bar_code' not in df.columns or 'carton_code' not in df.columns:
+                st.error("❌ Excel文件中必须包含 'label_bar_code' 和 'carton_code' 列")
+                st.stop()
+            
+            mapping = dict(zip(df['label_bar_code'].astype(str), df['carton_code']))
 
-                # 根据目的仓类型选择匹配规则
-                page_to_barcode = {}
-                if st.session_state.warehouse_type == "FBA":
-                    st.info("🔍 使用 FBA 条码匹配规则：FBA开头 + 20位字母数字")
-                    for idx, page in enumerate(reader.pages):
-                        text = page.extract_text() or ""
-                        # FBA 条码匹配规则
-                        patterns = [
-                            r'FBA[A-Z0-9]{17}',      # 匹配 FBA + 17位字母数字
-                            r'[A-Z0-9]{20}',         # 匹配20位字母数字
-                            r'\b[A-Z0-9]{15,25}\b'   # 匹配15-25位字母数字
-                        ]
-                        
-                        barcode = ""
-                        for pattern in patterns:
-                            match = re.search(pattern, text)
-                            if match:
-                                barcode = match.group()
-                                break
-                        page_to_barcode[idx] = barcode
-                        
-                else:  # AWD
-                    st.info("🔍 使用 AWD 条码匹配规则：18位数字")
-                    for idx, page in enumerate(reader.pages):
-                        text = page.extract_text() or ""
-                        # AWD 条码匹配规则
-                        match = re.search(r'\d{18}', text)
-                        barcode = match.group() if match else ""
-                        page_to_barcode[idx] = barcode
+            # 临时保存 PDF 文件
+            tmp_pdf = tempfile.NamedTemporaryFile(delete=False).name
+            with open(tmp_pdf, "wb") as f:
+                f.write(uploaded_pdf.read())
 
-                # 显示提取统计
-                extracted_count = sum(1 for code in page_to_barcode.values() if code)
-                st.write(f"📊 条码提取统计: 总页数 {len(reader.pages)}，成功提取条码 {extracted_count} 页")
+            reader = PdfReader(tmp_pdf)
 
-                # 按 Excel 顺序排序 PDF
-                writer = PdfWriter()
-                used_pages = set()
-                failed = []
-
-                # 进度条
-                progress_bar = st.progress(0)
-                total_barcodes = len(mapping.keys())
-                
-                for i, barcode in enumerate(mapping.keys()):
-                    found = False
-                    for page_idx, code in page_to_barcode.items():
-                        if code == barcode and page_idx not in used_pages:
-                            writer.add_page(reader.pages[page_idx])
-                            used_pages.add(page_idx)
-                            found = True
+            # 根据目的仓类型选择不同的条码匹配方式
+            page_to_barcode = {}
+            
+            if warehouse_type == "FBA":
+                st.info("🔍 使用 FBA 条码匹配方式")
+                # FBA 匹配逻辑
+                for idx, page in enumerate(reader.pages):
+                    text = page.extract_text() or ""
+                    
+                    # 多种匹配模式尝试
+                    patterns = [
+                        r'FBA[A-Z0-9]{17}',  # 匹配 FBA + 17位字母数字
+                        r'FBA\d{3}[A-Z0-9]{14}',  # 更具体的模式：FBA + 3数字 + 14位字母数字
+                        r'[A-Z0-9]{20}',  # 匹配20位字母数字
+                        r'\b[A-Z0-9]{15,25}\b'  # 匹配15-25位字母数字（单词边界）
+                    ]
+                    
+                    barcode = ""
+                    for pattern in patterns:
+                        match = re.search(pattern, text)
+                        if match:
+                            barcode = match.group()
                             break
                     
-                    if not found:
-                        failed.append(barcode)
-                    
-                    # 更新进度
-                    progress_bar.progress((i + 1) / total_barcodes)
+                    page_to_barcode[idx] = barcode
+                    st.write(f"页面 {idx+1}: 提取到的条码 -> {barcode if barcode else '未找到'}")
 
-                # 输出 PDF
-                output_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
-                with open(output_file, "wb") as f:
-                    writer.write(f)
+            else:  # AWD
+                st.info("🔍 使用 AWD 条码匹配方式")
+                # AWD 匹配逻辑
+                for idx, page in enumerate(reader.pages):
+                    text = page.extract_text() or ""
+                    match = re.search(r'\d{18}', text)
+                    barcode = match.group() if match else ""
+                    page_to_barcode[idx] = barcode
+                    st.write(f"页面 {idx+1}: 提取到的条码 -> {barcode if barcode else '未找到'}")
 
-                # 保存到session state
-                with open(output_file, "rb") as f:
-                    st.session_state.download_file = f.read()
-                st.session_state.failed_list = failed
-                st.session_state.processed = True
+            # 按 Excel 顺序排序 PDF
+            writer = PdfWriter()
+            used_pages = set()
+            failed = []
+
+            st.write("开始匹配排序...")
+            for barcode in mapping.keys():
+                found = False
+                st.write(f"正在查找条码: {barcode}")
                 
-                # 清理临时文件
-                try:
-                    os.unlink(tmp_pdf)
-                    os.unlink(output_file)
-                except:
-                    pass  # 忽略临时文件清理错误
+                for page_idx, code in page_to_barcode.items():
+                    if code == barcode and page_idx not in used_pages:
+                        writer.add_page(reader.pages[page_idx])
+                        used_pages.add(page_idx)
+                        found = True
+                        st.write(f"✅ 匹配成功: 条码 {barcode} -> 页面 {page_idx+1}")
+                        break
                 
-                st.success("🎉 处理完成！")
-                
-            except Exception as e:
-                st.error(f"❌ 处理过程中出现错误: {str(e)}")
+                if not found:
+                    failed.append(barcode)
+                    st.write(f"❌ 未找到匹配: {barcode}")
+
+            # 输出 PDF
+            output_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
+            with open(output_file, "wb") as f:
+                writer.write(f)
+
+            # 保存处理结果到session state
+            with open(output_file, "rb") as f:
+                st.session_state.download_file = f.read()
+            st.session_state.failed_list = failed
+            st.session_state.success_count = len(used_pages)
+            st.session_state.processed = True
+            
+            # 清理临时文件
+            try:
+                os.unlink(tmp_pdf)
+                os.unlink(output_file)
+            except:
+                pass
+            
+            st.success("🎉 处理完成！")
+
+        except Exception as e:
+            st.error(f"❌ 处理过程中出现错误: {str(e)}")
 
 # 显示处理结果和下载
 if st.session_state.processed:
     st.divider()
+    st.subheader("📋 处理结果")
+    
+    # 显示统计信息
+    total_count = st.session_state.success_count + len(st.session_state.failed_list)
+    st.info(f"📊 处理统计: 总条码数 {total_count}, 成功匹配 {st.session_state.success_count}, 未匹配 {len(st.session_state.failed_list)}")
     
     # 显示失败列表
     if st.session_state.failed_list:
         st.error(f"❌ 以下 {len(st.session_state.failed_list)} 个条码未匹配到 PDF：")
-        
-        # 分列显示失败条码
-        cols = st.columns(3)
-        failed_list = st.session_state.failed_list
-        items_per_col = (len(failed_list) + 2) // 3
-        
-        for i, col in enumerate(cols):
-            start_idx = i * items_per_col
-            end_idx = min((i + 1) * items_per_col, len(failed_list))
-            if start_idx < len(failed_list):
-                with col:
-                    for item in failed_list[start_idx:end_idx]:
-                        st.code(item, language="text")
+        st.code("\n".join(st.session_state.failed_list))
     else:
         st.success("✅ 所有条码都成功匹配！")
     
     # 下载按钮
-    if st.session_state.download_file:
-        st.download_button(
-            label="📥 下载排序后的 PDF",
-            data=st.session_state.download_file,
-            file_name=f"sorted_output_{st.session_state.warehouse_type}.pdf",
-            mime="application/pdf",
-            use_container_width=True,
-            type="primary"
-        )
-    
-    # 处理统计
-    if st.session_state.total_barcodes > 0:
-        success_count = st.session_state.total_barcodes - len(st.session_state.failed_list)
-        st.info(f"""
-        📈 **处理统计:**
-        - 总条码数: {st.session_state.total_barcodes}
-        - 成功匹配: {success_count}
-        - 未匹配: {len(st.session_state.failed_list)}
-        - 成功率: {success_count/st.session_state.total_barcodes*100:.1f}%
-        """)
+    st.download_button(
+        "📥 下载排序后的 PDF",
+        st.session_state.download_file,
+        file_name=f"sorted_output_{warehouse_type}.pdf",
+        mime="application/pdf"
+    )
 
 # 使用说明
 with st.expander("📖 使用说明"):
@@ -220,11 +198,11 @@ with st.expander("📖 使用说明"):
     5. **下载结果** - 获取排序后的PDF文件
 
     ### 条码格式说明:
-    - **FBA**: FBA开头 + 20位字母数字 (如: FBA193CJMR8PU000029)
+    - **FBA**: FBA开头 + 字母数字组合 (如: FBA193CJMR8PU000029)
     - **AWD**: 18位纯数字条码
 
     ### 注意事项:
     - 确保Excel中的条码与PDF中的条码完全一致
     - 处理完成后会显示未匹配的条码列表
-    - 点击「重置」可以重新开始新的处理
+    - 点击「重置所有」可以重新开始新的处理
     """)
