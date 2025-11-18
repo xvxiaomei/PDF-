@@ -18,12 +18,17 @@ if 'download_file' not in st.session_state:
     st.session_state.download_file = None
 if 'failed_list' not in st.session_state:
     st.session_state.failed_list = []
+if 'total_barcodes' not in st.session_state:
+    st.session_state.total_barcodes = 0
+if 'warehouse_type' not in st.session_state:
+    st.session_state.warehouse_type = "FBA"
 
 # 重置函数
 def reset_processing():
     st.session_state.processed = False
     st.session_state.download_file = None
     st.session_state.failed_list = []
+    st.session_state.total_barcodes = 0
 
 # 侧边栏选择目的仓类型
 with st.sidebar:
@@ -33,6 +38,7 @@ with st.sidebar:
         ["FBA", "AWD"],
         help="FBA: 匹配FBA开头的20位字母数字条码 | AWD: 匹配18位数字条码"
     )
+    st.session_state.warehouse_type = warehouse_type
     
     if st.button("🔄 重置", use_container_width=True):
         reset_processing()
@@ -68,6 +74,7 @@ if uploaded_excel and uploaded_pdf and not st.session_state.processed:
                     st.stop()
                 
                 mapping = dict(zip(df['label_bar_code'].astype(str), df['carton_code']))
+                st.session_state.total_barcodes = len(mapping)
                 
                 # 临时保存 PDF 文件
                 tmp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
@@ -78,7 +85,7 @@ if uploaded_excel and uploaded_pdf and not st.session_state.processed:
 
                 # 根据目的仓类型选择匹配规则
                 page_to_barcode = {}
-                if warehouse_type == "FBA":
+                if st.session_state.warehouse_type == "FBA":
                     st.info("🔍 使用 FBA 条码匹配规则：FBA开头 + 20位字母数字")
                     for idx, page in enumerate(reader.pages):
                         text = page.extract_text() or ""
@@ -146,8 +153,11 @@ if uploaded_excel and uploaded_pdf and not st.session_state.processed:
                 st.session_state.processed = True
                 
                 # 清理临时文件
-                os.unlink(tmp_pdf)
-                os.unlink(output_file)
+                try:
+                    os.unlink(tmp_pdf)
+                    os.unlink(output_file)
+                except:
+                    pass  # 忽略临时文件清理错误
                 
                 st.success("🎉 处理完成！")
                 
@@ -178,24 +188,26 @@ if st.session_state.processed:
         st.success("✅ 所有条码都成功匹配！")
     
     # 下载按钮
-    st.download_button(
-        label="📥 下载排序后的 PDF",
-        data=st.session_state.download_file,
-        file_name=f"sorted_output_{warehouse_type}.pdf",
-        mime="application/pdf",
-        use_container_width=True,
-        type="primary"
-    )
+    if st.session_state.download_file:
+        st.download_button(
+            label="📥 下载排序后的 PDF",
+            data=st.session_state.download_file,
+            file_name=f"sorted_output_{st.session_state.warehouse_type}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+            type="primary"
+        )
     
     # 处理统计
-    success_count = len(mapping) - len(st.session_state.failed_list)
-    st.info(f"""
-    📈 **处理统计:**
-    - 总条码数: {len(mapping)}
-    - 成功匹配: {success_count}
-    - 未匹配: {len(st.session_state.failed_list)}
-    - 成功率: {success_count/len(mapping)*100:.1f}%
-    """)
+    if st.session_state.total_barcodes > 0:
+        success_count = st.session_state.total_barcodes - len(st.session_state.failed_list)
+        st.info(f"""
+        📈 **处理统计:**
+        - 总条码数: {st.session_state.total_barcodes}
+        - 成功匹配: {success_count}
+        - 未匹配: {len(st.session_state.failed_list)}
+        - 成功率: {success_count/st.session_state.total_barcodes*100:.1f}%
+        """)
 
 # 使用说明
 with st.expander("📖 使用说明"):
